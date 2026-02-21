@@ -14,3 +14,7 @@ tests/
 **/*.test.js
 **/*.spec.js
 **/gas-mocks.js
+
+# Temporary logs and instructions
+Log*.md
+instruction.md
