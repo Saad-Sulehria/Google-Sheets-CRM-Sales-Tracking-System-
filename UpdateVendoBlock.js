@@ -282,6 +282,7 @@ function processUpdateAllVendorBlocksBatch(isManual) {
 }
 
 function finalizeBatchedUpdate_(ss, cacheSheet, props, isManual) {
+    const state = JSON.parse(props.getProperty("UPDATE_ALL_BATCH_STATE") || "{}");
     props.deleteProperty("UPDATE_ALL_BATCH_STATE");
     removeTriggers_("processUpdateAllVendorBlocksBatch");
 
@@ -291,15 +292,52 @@ function finalizeBatchedUpdate_(ss, cacheSheet, props, isManual) {
         Logger.log("Failed to delete cache sheet: " + e.message);
     }
 
-    // Note: Reconnect Notes Links is no longer auto-called to prevent timeout
-    // User should run it manually after batched update completes
+    // Phase 6.5 + 6.55: Clear trailing rows and columns (same as non-batched path)
+    try {
+        const notesSheet = ss.getSheetByName(CONFIG.notesSheetName);
+        if (notesSheet && state.vendorCount && state.templateHeight != null) {
+            const blankRows = state.blankRows || 0;
+            const lastVendorEndRow = state.vendorCount * (1 + state.templateHeight + blankRows);
+            const sheetMaxRow = notesSheet.getMaxRows();
 
-    if (isManual) {
-        SpreadsheetApp.getUi().alert(
-            "✅ Batch Update Complete\n\n" +
-            "⚠️ IMPORTANT: Please run 'Reconnect Notes Links' now!\n\n" +
-            "Go to: ⚡ CRM Tools > Reconnect Notes Links"
+            if (sheetMaxRow > lastVendorEndRow) {
+                const rowsToClear = sheetMaxRow - lastVendorEndRow;
+                Logger.log("Clearing " + rowsToClear + " trailing rows after row " + lastVendorEndRow);
+                const trailingRowsRange = notesSheet.getRange(lastVendorEndRow + 1, 1, rowsToClear, notesSheet.getMaxColumns());
+                trailingRowsRange.clearContent();
+                trailingRowsRange.clearDataValidations();
+            }
+
+            const sheetMaxCols = notesSheet.getMaxColumns();
+            const lastUsedCol = 1 + (state.templateContentWidth || state.templateCopyWidth || 0);
+            if (sheetMaxCols > lastUsedCol) {
+                const colsToClear = sheetMaxCols - lastUsedCol;
+                Logger.log("Clearing " + colsToClear + " trailing columns after column " + lastUsedCol);
+                const trailingColsRange = notesSheet.getRange(1, lastUsedCol + 1, sheetMaxRow, colsToClear);
+                trailingColsRange.clearContent();
+                trailingColsRange.clearDataValidations();
+            }
+        }
+    } catch (e) {
+        Logger.log("Trailing cleanup error (non-fatal): " + e.message);
+    }
+
+    // Auto-reconnect Notes Links (safe for headless triggers - no getUi() inside)
+    try {
+        reconnectNotesLinksInternal(ss);
+        Logger.log("Notes Links reconnected after batch update.");
+    } catch (e) {
+        Logger.log("Notes Links reconnect error (non-fatal): " + e.message);
+    }
+
+    // Store completion flag — shown to user on next sheet open (onOpen has a valid UI context)
+    try {
+        PropertiesService.getDocumentProperties().setProperty(
+            "BATCH_UPDATE_COMPLETE",
+            JSON.stringify({ vendorCount: state.vendorCount, timestamp: new Date().toISOString() })
         );
+    } catch (e) {
+        Logger.log("Could not store completion flag: " + e.message);
     }
 }
 
@@ -367,11 +405,16 @@ function injectVendorData_(sheet, vendor, labelMap, blockStartRow, templateHeigh
         const valueFormulas = item.valueFormulas || [];
 
         for (let v = 0; v < values.length; v++) {
-            const val = values[v];
+            let val = values[v];
             const targetCol = valueStartCol + v;
 
             if (val === null) continue;
             if (targetCol >= newValuesToSet[relativeRow].length) continue;
+
+            // Reconvert ISO date strings back to Date objects (lost during JSON cache serialization)
+            if (typeof val === 'string' && /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/.test(val)) {
+                val = new Date(val);
+            }
 
             newValuesToSet[relativeRow][targetCol] = val;
 
@@ -863,6 +906,231 @@ function injectDataByLabel(sheet, vendorData, labelMap, templateHeight, template
     }
 
     return warnings;
+}
+
+/**
+ * Create a filtered view of vendor blocks in a separate sheet.
+ * Prompts for destination sheet name and up to 2 label/value filter criteria.
+ * Only vendors matching ALL filters are written to the destination sheet.
+ * Formatting, template structure, and blank rows are preserved identically.
+ */
+function createFilteredView() {
+    const ui = SpreadsheetApp.getUi();
+    const ss = SpreadsheetApp.getActive();
+    const notesSheet = ss.getSheetByName(CONFIG.notesSheetName);
+    const templateSheet = ss.getSheetByName(CONFIG.templateSheetName);
+
+    if (!notesSheet || !templateSheet) {
+        ui.alert("Missing required sheets: " + CONFIG.notesSheetName + " or " + CONFIG.templateSheetName);
+        return;
+    }
+
+    // Step 1: Ask for destination sheet name
+    const destResponse = ui.prompt(
+        "Create Filtered View (1/4)",
+        "Enter destination sheet name (will be created if it doesn't exist):",
+        ui.ButtonSet.OK_CANCEL
+    );
+    if (destResponse.getSelectedButton() !== ui.Button.OK) return;
+    const destSheetName = destResponse.getResponseText().trim();
+    if (!destSheetName) {
+        ui.alert("Sheet name cannot be empty.");
+        return;
+    }
+
+    // Step 2: Ask for first filter header
+    const header1Response = ui.prompt(
+        "Create Filtered View (2/4)",
+        "Enter filter header label (e.g. \"Category\"):",
+        ui.ButtonSet.OK_CANCEL
+    );
+    if (header1Response.getSelectedButton() !== ui.Button.OK) return;
+    const filterHeader1 = header1Response.getResponseText().trim();
+    if (!filterHeader1) {
+        ui.alert("Filter header cannot be empty.");
+        return;
+    }
+
+    // Step 3: Ask for first filter value
+    const value1Response = ui.prompt(
+        "Create Filtered View (3/4)",
+        "Enter value to match for \"" + filterHeader1 + "\" (case-insensitive):",
+        ui.ButtonSet.OK_CANCEL
+    );
+    if (value1Response.getSelectedButton() !== ui.Button.OK) return;
+    const filterValue1 = value1Response.getResponseText().trim();
+
+    const filters = [{ header: filterHeader1, value: filterValue1 }];
+
+    // Step 4: Optional second filter
+    const addSecondResponse = ui.alert(
+        "Create Filtered View (4/4)",
+        "Do you want to add a second filter? (AND logic — vendor must match both)\n\nCurrent filter: " + filterHeader1 + " = \"" + filterValue1 + "\"",
+        ui.ButtonSet.YES_NO
+    );
+
+    if (addSecondResponse === ui.Button.YES) {
+        const header2Response = ui.prompt(
+            "Second Filter — Header",
+            "Enter second filter header label:",
+            ui.ButtonSet.OK_CANCEL
+        );
+        if (header2Response.getSelectedButton() !== ui.Button.OK) return;
+        const filterHeader2 = header2Response.getResponseText().trim();
+
+        const value2Response = ui.prompt(
+            "Second Filter — Value",
+            "Enter value to match for \"" + filterHeader2 + "\":",
+            ui.ButtonSet.OK_CANCEL
+        );
+        if (value2Response.getSelectedButton() !== ui.Button.OK) return;
+        const filterValue2 = value2Response.getResponseText().trim();
+
+        if (filterHeader2) {
+            filters.push({ header: filterHeader2, value: filterValue2 });
+        }
+    }
+
+    // Extract all vendor data from Meeting Notes
+    const templateHeight = templateSheet.getLastRow();
+    const templateContentWidth = templateSheet.getLastColumn();
+    const templateCopyWidth = getTemplateMaxColumn(templateSheet, templateHeight);
+    const templateRange = templateSheet.getRange(1, 1, templateHeight, templateCopyWidth);
+
+    const allVendors = extractAllVendorData(notesSheet, templateHeight);
+
+    // Read raw sheet data for filter matching (needed because filter headers like
+    // "Category" may be column sub-headers, not root-level labels).
+    const lastRow = notesSheet.getLastRow();
+    const lastCol = notesSheet.getLastColumn();
+    const rawData = lastRow > 0 ? notesSheet.getRange(1, 1, lastRow, lastCol).getValues() : [];
+    const rawWeights = lastRow > 0 ? notesSheet.getRange(1, 1, lastRow, lastCol).getFontWeights() : [];
+
+    // Build vendor block boundaries from raw data (bold text in column A)
+    const vendorBlocks = [];
+    for (let i = 0; i < rawData.length; i++) {
+        const cellA = rawData[i][0];
+        if (cellA && String(cellA).trim() !== "" && rawWeights[i][0] === "bold") {
+            vendorBlocks.push({ name: String(cellA).trim(), startRow: i });
+        }
+    }
+
+    // Set end rows
+    for (let i = 0; i < vendorBlocks.length; i++) {
+        vendorBlocks[i].endRow = (i + 1 < vendorBlocks.length)
+            ? vendorBlocks[i + 1].startRow
+            : rawData.length;
+    }
+
+    // Filter: for each vendor block, scan all cells for the header text,
+    // then check the cell DIRECTLY BELOW for the filter value.
+    const matchingVendorNames = new Set();
+
+    for (const block of vendorBlocks) {
+        const passesAll = filters.every(filter => {
+            const headerLower = filter.header.toLowerCase();
+            const valueLower = filter.value.toLowerCase();
+
+            for (let r = block.startRow; r < block.endRow; r++) {
+                for (let c = 0; c < rawData[r].length; c++) {
+                    const cellVal = String(rawData[r][c] || "").trim().toLowerCase();
+                    if (cellVal === headerLower) {
+                        // Found the header — check the cell directly below
+                        const dataRow = r + 1;
+                        if (dataRow < block.endRow) {
+                            const dataVal = String(rawData[dataRow][c] || "").trim().toLowerCase();
+                            if (dataVal === valueLower) return true;
+                        }
+                        // Also check same-row value to the right (for label: value pairs)
+                        if (c + 1 < rawData[r].length) {
+                            const rightVal = String(rawData[r][c + 1] || "").trim().toLowerCase();
+                            if (rightVal === valueLower) return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+
+        if (passesAll) {
+            matchingVendorNames.add(block.name);
+        }
+    }
+
+    // Filter the extracted vendor data by matching names
+    const matchingVendors = allVendors.filter(v => matchingVendorNames.has(v.name));
+
+    if (matchingVendors.length === 0) {
+        const filterSummary = filters.map(f => '"' + f.header + '" = "' + f.value + '"').join(" AND ");
+        ui.alert("No vendors matched the filter: " + filterSummary + "\n\nNo changes were made.");
+        return;
+    }
+
+    // Get or create the destination sheet
+    let destSheet = ss.getSheetByName(destSheetName);
+    if (destSheet) {
+        destSheet.clear();
+    } else {
+        destSheet = ss.insertSheet(destSheetName);
+    }
+
+    // Ensure sheet has enough rows
+    const blankRows = CONFIG.blankRowsAfterVendor || 0;
+    const blockHeight = 1 + templateHeight + blankRows;
+    const requiredRows = matchingVendors.length * blockHeight;
+    const currentMaxRows = destSheet.getMaxRows();
+    if (currentMaxRows < requiredRows) {
+        destSheet.insertRowsAfter(currentMaxRows, requiredRows - currentMaxRows);
+    }
+
+    // Write vendor blocks (same as the update flow)
+    const fullHeaderWidth = 1 + Math.max(templateContentWidth, templateCopyWidth);
+    rebuildVendorBlocks(destSheet, templateSheet, templateRange, matchingVendors, fullHeaderWidth);
+
+    // Inject data back
+    const labelMap = buildTemplateLabelMap(templateSheet, templateRange);
+    injectDataByLabel(destSheet, matchingVendors, labelMap, templateHeight, templateContentWidth);
+
+    // Copy column widths from Meeting Notes (uniform across all vendor blocks)
+    const lastUsedCol = 1 + Math.max(templateContentWidth, templateCopyWidth);
+    for (let c = 1; c <= lastUsedCol; c++) {
+        destSheet.setColumnWidth(c, notesSheet.getColumnWidth(c));
+    }
+
+    // Copy row heights from Meeting Notes — use the first block as the pattern
+    // Block layout: 1 header row + templateHeight rows + blankRows
+    if (allVendors.length > 0) {
+        const srcBlockHeight = 1 + templateHeight + blankRows;
+        const srcHeights = [];
+        for (let r = 1; r <= srcBlockHeight; r++) {
+            srcHeights.push(notesSheet.getRowHeight(r));
+        }
+        // Apply the same row height pattern to each vendor block in the destination
+        for (let v = 0; v < matchingVendors.length; v++) {
+            for (let r = 0; r < srcBlockHeight; r++) {
+                const destRow = v * blockHeight + r + 1;
+                destSheet.setRowHeight(destRow, srcHeights[r]);
+            }
+        }
+    }
+
+    // Clear trailing rows after last vendor block
+    const lastVendorEndRow = matchingVendors.length * blockHeight;
+    const sheetMaxRow = destSheet.getMaxRows();
+    if (sheetMaxRow > lastVendorEndRow) {
+        const rowsToClear = sheetMaxRow - lastVendorEndRow;
+        destSheet.getRange(lastVendorEndRow + 1, 1, rowsToClear, destSheet.getMaxColumns())
+            .clearContent().clearDataValidations();
+    }
+
+    // Show summary
+    const filterSummary = filters.map(f => '"' + f.header + '" = "' + f.value + '"').join(" AND ");
+    ui.alert(
+        "✅ Filtered View Created\n\n" +
+        "Sheet: \"" + destSheetName + "\"\n" +
+        "Filter: " + filterSummary + "\n" +
+        "Vendors found: " + matchingVendors.length + " of " + allVendors.length
+    );
 }
 
 /**

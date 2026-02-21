@@ -1,13 +1,33 @@
 function onOpen() {
-  SpreadsheetApp.getUi()
-    .createMenu("⚡ CRM Tools")
+  const ui = SpreadsheetApp.getUi();
+
+  ui.createMenu("⚡ CRM Tools")
     .addItem("Create New Vendor", "createNewVendor")
-    .addItem("Update ALL Vendor Blocks", "updateAllVendorBlocks")
+    .addItem("Update ALL Vendor Blocks", "startUpdateAllVendorBlocksBatched")
     .addItem("Sync Mailing List", "manualSyncMailingList")
     .addItem("Reconnect Notes Links", "reconnectNotesLinks")
     .addItem("Rename Header", "renameHeader")
+    .addItem("Create Filtered View", "createFilteredView")
     .addSeparator()
     .addItem("Rename Sheet", "renameSheet")
     .addItem("Manual Backup", "manualBackup")
     .addToUi();
+
+  // Show batch update completion message if a batch finished while sheet was closed
+  try {
+    const props = PropertiesService.getDocumentProperties();
+    const completionFlag = props.getProperty("BATCH_UPDATE_COMPLETE");
+    if (completionFlag) {
+      props.deleteProperty("BATCH_UPDATE_COMPLETE");
+      const info = JSON.parse(completionFlag);
+      ui.alert(
+        "✅ Batch Update Complete\n\n" +
+        info.vendorCount + " vendor blocks were updated successfully.\n" +
+        "Notes Links have been reconnected automatically."
+      );
+    }
+  } catch (e) {
+    // Non-fatal — don't block the menu from opening
+    Logger.log("Could not check batch completion flag: " + e.message);
+  }
 }
