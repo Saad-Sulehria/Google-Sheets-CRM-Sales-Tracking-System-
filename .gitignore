@@ -1,0 +1,16 @@
+# Node files
+node_modules/
+node-bin/
+
+# Other ignored patterns from .claspignore
+*.py
+Specifications/
+package*.json
+.clasp.json
+.claspignore
+
+# Test files
+tests/
+**/*.test.js
+**/*.spec.js
+**/gas-mocks.js
