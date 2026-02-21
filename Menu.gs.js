@@ -11,6 +11,11 @@ function onOpen() {
     .addSeparator()
     .addItem("Rename Sheet", "renameSheet")
     .addItem("Manual Backup", "manualBackup")
+    .addSeparator()
+    .addItem("Create Phil Sheet", "createPhilSheet")
+    .addItem("Sync Phil Sheet Now", "manualPhilSync")
+    .addItem("Remove Vendor from Phil", "removeVendorFromPhil")
+    .addItem("Remove Phil Sync", "removePhilSync")
     .addToUi();
 
   // Show batch update completion message if a batch finished while sheet was closed

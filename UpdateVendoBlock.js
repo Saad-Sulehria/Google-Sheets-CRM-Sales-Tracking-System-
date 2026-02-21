@@ -15,7 +15,7 @@ const CONFIG = {
     // Vendor block layout settings
     blankRowsAfterVendor: 1,        // Number of blank rows after each vendor block
     vendorHeaderBgColor: "#ff00ff", // Magenta background for vendor header row (full width)
-    updateBatchSize: 10,            // Vendors per batch when using batched update
+    updateBatchSize: 100,            // Vendors per batch when using batched update
     preserveRichTextLinks: false    // Set true to preserve rich-text links (slower)
 };
 
