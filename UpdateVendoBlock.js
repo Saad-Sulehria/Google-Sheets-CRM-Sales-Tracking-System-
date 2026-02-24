@@ -1027,7 +1027,7 @@ function createFilteredView() {
     const matchingVendorNames = new Set();
 
     for (const block of vendorBlocks) {
-        const passesAll = filters.every(filter => {
+        const passesAny = filters.some(filter => {
             const headerLower = filter.header.toLowerCase();
             const valueLower = filter.value.toLowerCase();
 
@@ -1052,7 +1052,7 @@ function createFilteredView() {
             return false;
         });
 
-        if (passesAll) {
+        if (passesAny) {
             matchingVendorNames.add(block.name);
         }
     }
@@ -1061,7 +1061,7 @@ function createFilteredView() {
     const matchingVendors = allVendors.filter(v => matchingVendorNames.has(v.name));
 
     if (matchingVendors.length === 0) {
-        const filterSummary = filters.map(f => '"' + f.header + '" = "' + f.value + '"').join(" AND ");
+        const filterSummary = filters.map(f => '"' + f.header + '" = "' + f.value + '"').join(" OR ");
         ui.alert("No vendors matched the filter: " + filterSummary + "\n\nNo changes were made.");
         return;
     }

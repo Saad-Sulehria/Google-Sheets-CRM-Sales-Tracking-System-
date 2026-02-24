@@ -9,13 +9,13 @@ function onOpen() {
     .addItem("Rename Header", "renameHeader")
     .addItem("Create Filtered View", "createFilteredView")
     .addSeparator()
+    .addItem("Rank Vendors", "rankVendors")
+    .addItem("Move Vendor to Sheet", "moveVendorToSheet")
+    .addItem("Remove Vendor", "removeVendor")
+    .addItem("Sync Sheets", "syncSheets")
+    .addSeparator()
     .addItem("Rename Sheet", "renameSheet")
     .addItem("Manual Backup", "manualBackup")
-    .addSeparator()
-    .addItem("Create Phil Sheet", "createPhilSheet")
-    .addItem("Sync Phil Sheet Now", "manualPhilSync")
-    .addItem("Remove Vendor from Phil", "removeVendorFromPhil")
-    .addItem("Remove Phil Sync", "removePhilSync")
     .addToUi();
 
   // Show batch update completion message if a batch finished while sheet was closed
