@@ -589,3 +589,273 @@ function normalizeForSyncCompare_(val) {
     if (typeof val === 'boolean') return val ? "TRUE" : "FALSE";
     return String(val).trim();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 5. EXPAND NEW SHEET VENDORS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Reads a flat vendor list (one row per contact) from a source sheet
+ * and creates structured vendor blocks in a destination sheet.
+ * Handles multiple contacts per vendor by inserting extra rows.
+ */
+function expandNewSheetVendors() {
+    const ui = SpreadsheetApp.getUi();
+    const ss = SpreadsheetApp.getActive();
+
+    // 1. Prompt for source sheet
+    const sourceSheetName = promptSheetName_(ui,
+        "Expand Vendors — Step 1 of 2",
+        "Enter the SOURCE sheet name (contains flat rows):"
+    );
+    if (!sourceSheetName) { if (sourceSheetName === null) return; ui.alert("Source sheet name is required."); return; }
+
+    const sourceSheet = ss.getSheetByName(sourceSheetName);
+    if (!sourceSheet) { ui.alert("Source sheet not found: \"" + sourceSheetName + "\""); return; }
+
+    // 2. Prompt for destination sheet
+    const destSheetName = promptSheetName_(ui,
+        "Expand Vendors — Step 2 of 2",
+        "Enter the DESTINATION sheet name (will be created if needed):"
+    );
+    if (!destSheetName) { if (destSheetName === null) return; ui.alert("Destination sheet name is required."); return; }
+
+    // 3. Get templates
+    const templateSheet = getSheetOrAlert_(ss, CONFIG.templateSheetName, ui);
+    if (!templateSheet) return;
+
+    const templateHeight = templateSheet.getLastRow();
+    const templateContentWidth = templateSheet.getLastColumn();
+    const templateCopyWidth = Math.max(templateContentWidth, getTemplateMaxColumn(templateSheet, templateHeight));
+    const templateRange = templateSheet.getRange(1, 1, templateHeight, templateCopyWidth);
+    const labelMap = buildTemplateLabelMap(templateSheet, templateRange);
+
+    // Scan template to build a dynamic coordinate map for column-header style fields
+    const posMap = {};
+    const tData = templateRange.getValues();
+    for (let r = 0; r < tData.length; r++) {
+        for (let c = 0; c < tData[r].length; c++) {
+            const val = String(tData[r][c] || "").trim().toLowerCase();
+            if (val === "name" && !posMap.name) posMap.name = { r: r + 1, c: c };
+            else if (val === "title" && !posMap.title) posMap.title = { r: r + 1, c: c };
+            else if (val === "email" && !posMap.email) posMap.email = { r: r + 1, c: c };
+            else if (val === "linkedin" && !posMap.linkedin) posMap.linkedin = { r: r + 1, c: c };
+            else if (val === "geo" && !posMap.geo) posMap.geo = { r: r + 1, c: c };
+            else if (val === "hc" && !posMap.hc) posMap.hc = { r: r + 1, c: c };
+        }
+    }
+
+    // 4. Read Source Data
+    const srcLastRow = sourceSheet.getLastRow();
+    const srcLastCol = sourceSheet.getLastColumn();
+    if (srcLastRow < 2) {
+        ui.alert("Source sheet has no data rows (needs header in row 1 + data).");
+        return;
+    }
+
+    const srcData = sourceSheet.getRange(1, 1, srcLastRow, srcLastCol).getValues();
+    const headers = srcData[0].map(h => String(h).trim().toLowerCase());
+
+    // Header indices mapping - using includes for maximum robustness against extra spaces/newlines
+    const colIdx = {
+        vendor: headers.findIndex(h => h.includes("vendor")),
+        exclude: headers.findIndex(h => h.includes("exclude")),
+        firstName: headers.findIndex(h => h.includes("first name")),
+        lastName: headers.findIndex(h => h.includes("last name")),
+        title: headers.findIndex(h => h.includes("title")),
+        email: headers.findIndex(h => h === "email"), // Exact match to avoid "got email" or "email?"
+        linkedin: headers.findIndex(h => h === "li" || h.includes("linkedin")), // 'LI' is tricky, strict or linkedin
+        geo: headers.findIndex(h => h.includes("geo")),
+        hc: headers.findIndex(h => h.includes("hc") || h.includes("headcount"))
+    };
+
+    if (colIdx.vendor === -1) {
+        ui.alert("Could not find 'Vendor' column in source sheet header.");
+        return;
+    }
+
+    if (colIdx.exclude === -1) {
+        ui.alert("Notice: Could not find 'Exclude' column in the header. Vendors will not be skipped.");
+    }
+
+    // 5. Group by Vendor
+    const vendorsMap = new Map(); // vendorName -> array of contact objects
+    const vendorNamesInOrder = []; // To preserve source order
+    const globallyExcludedVendors = new Set(); // Track vendors that have 'Y' on ANY row
+
+    for (let r = 1; r < srcData.length; r++) {
+        const row = srcData[r];
+        const vendorName = String(row[colIdx.vendor] || "").trim();
+        const excludeFlag = colIdx.exclude !== -1 ? String(row[colIdx.exclude] || "").trim().toUpperCase() : "";
+
+        if (!vendorName) continue;
+
+        // If ANY row for this vendor has a 'Y', the entire vendor is blacklisted
+        if (excludeFlag.startsWith("Y")) {
+            globallyExcludedVendors.add(vendorName);
+            continue;
+        }
+
+        const contact = {
+            firstName: colIdx.firstName !== -1 ? String(row[colIdx.firstName] || "").trim() : "",
+            lastName: colIdx.lastName !== -1 ? String(row[colIdx.lastName] || "").trim() : "",
+            title: colIdx.title !== -1 ? String(row[colIdx.title] || "").trim() : "",
+            email: colIdx.email !== -1 ? String(row[colIdx.email] || "").trim() : "",
+            linkedin: colIdx.linkedin !== -1 ? String(row[colIdx.linkedin] || "").trim() : "",
+            geo: colIdx.geo !== -1 ? String(row[colIdx.geo] || "").trim() : "",
+            hc: colIdx.hc !== -1 ? String(row[colIdx.hc] || "").trim() : ""
+        };
+
+        contact.fullName = [contact.firstName, contact.lastName].filter(Boolean).join(" ");
+
+        if (!vendorsMap.has(vendorName)) {
+            vendorsMap.set(vendorName, []);
+            vendorNamesInOrder.push(vendorName);
+        }
+
+        const existingContacts = vendorsMap.get(vendorName);
+        const isDuplicate = existingContacts.some(
+            c => c.fullName.toLowerCase() === contact.fullName.toLowerCase()
+        );
+
+        if (!isDuplicate && contact.fullName) {
+            existingContacts.push(contact);
+        } else if (existingContacts.length === 0 && !contact.fullName) {
+            // Push empty contact to preserve the vendor block if it's the only row
+            existingContacts.push(contact);
+        }
+    }
+
+    // Filter out any vendors that were flagged for exclusion on ANY row
+    const finalVendorsList = vendorNamesInOrder.filter(v => !globallyExcludedVendors.has(v));
+
+    if (finalVendorsList.length === 0) {
+        ui.alert("No valid vendors found to process (all were excluded or empty).");
+        return;
+    }
+
+    // 6. Setup Destination Sheet
+    let destSheet = ss.getSheetByName(destSheetName);
+    if (!destSheet) {
+        destSheet = ss.insertSheet(destSheetName);
+    } else {
+        const response = ui.alert(
+            "Destination sheet exists",
+            "Sheet \"" + destSheetName + "\" already exists. This will append to the bottom. Continue?",
+            ui.ButtonSet.YES_NO
+        );
+        if (response !== ui.Button.YES) return;
+    }
+
+    // Prepare block formatting info
+    const existingBlocks = findVendorBlocks_(destSheet);
+    const numExisting = existingBlocks.length;
+    const blankRows = CONFIG.blankRowsAfterVendor || 0;
+
+    // Assuming worst case space needed (base block + 1 row per extra contact)
+    const requiredExtraRows = vendorNamesInOrder.length * (templateHeight + blankRows + 5) + 10;
+    destSheet.insertRowsAfter(destSheet.getMaxRows(), requiredExtraRows);
+
+    let currentDestRow = destSheet.getLastRow() + (destSheet.getLastRow() > 0 ? 1 : 1);
+    const fullHeaderWidth = 1 + templateCopyWidth;
+
+    let processedCount = 0;
+
+    // 7. Write Blocks
+    for (const vName of finalVendorsList) {
+        const contacts = vendorsMap.get(vName);
+        if (contacts.length === 0) continue;
+
+        const mainContact = contacts[0];
+        const extraContacts = contacts.slice(1);
+
+        // --- Write Header ---
+        const headerCell = destSheet.getRange(currentDestRow, 1);
+        headerCell.setValue(vName);
+        headerCell.setFontWeight("bold");
+        headerCell.setFontColor("#ffffff");
+
+        const headerRowRange = destSheet.getRange(currentDestRow, 1, 1, fullHeaderWidth);
+        headerRowRange.setBackground(CONFIG.vendorHeaderBgColor || "#ff00ff");
+        if (fullHeaderWidth > 1) {
+            destSheet.getRange(currentDestRow, 2, 1, fullHeaderWidth - 1).clearContent().clearDataValidations().removeCheckboxes();
+        }
+
+        // --- Copy Base Template ---
+        const blockStartRow = currentDestRow + 1;
+        const targetRange = destSheet.getRange(blockStartRow, 2, templateHeight, templateCopyWidth);
+        templateRange.copyTo(targetRange, { contentsOnly: false });
+
+        // Calculate actual height of this block (might increase if we add contacts)
+        let currentBlockHeight = templateHeight;
+
+        // --- Inject First Contact & Company Info ---
+        const fieldsToInject = [
+            { key: "name", val: mainContact.fullName },
+            { key: "title", val: mainContact.title },
+            { key: "email", val: mainContact.email },
+            { key: "linkedin", val: mainContact.linkedin },
+            { key: "geo", val: mainContact.geo },
+            { key: "hc", val: mainContact.hc }
+        ];
+
+        for (const field of fieldsToInject) {
+            if (!field.val) continue;
+            const pos = posMap[field.key];
+            if (pos && pos.r < templateHeight) {
+                // pos.r is the row index (0-based) for the data row.
+                // Paste happens at column 2 (B), so absolute col = 2 + pos.c
+                destSheet.getRange(blockStartRow + pos.r, 2 + pos.c).setValue(field.val);
+            }
+        }
+
+        // --- Handle Multiple Contacts ---
+        if (extraContacts.length > 0) {
+            // Find where to add extra contacts (after the main Name row)
+            const namePos = posMap.name;
+            if (namePos) {
+                const absoluteInsertRow = blockStartRow + namePos.r; // The first data row
+
+                // For each extra contact, write data into the existing rows below it
+                for (let i = 0; i < extraContacts.length; i++) {
+                    const ec = extraContacts[i];
+                    const ecRow = absoluteInsertRow + i + 1; // move down one row per extra contact
+
+                    // If we exceed the template layout height (meaning no more blank rows in the template box),
+                    // only then we insert a row to avoid overlapping with section below
+                    if (namePos.r + i + 1 >= templateHeight) {
+                        destSheet.insertRowAfter(ecRow - 1);
+                        currentBlockHeight++;
+                        // Copy formatting from the first contact's data row to the new row
+                        destSheet.getRange(absoluteInsertRow, 2, 1, templateCopyWidth)
+                            .copyTo(destSheet.getRange(ecRow, 2), { formatOnly: true });
+                    }
+
+                    // Write secondary contact details into the exact same columns
+                    if (posMap.name) destSheet.getRange(ecRow, 2 + posMap.name.c).setValue(ec.fullName + " (Secondary)");
+                    if (posMap.title) destSheet.getRange(ecRow, 2 + posMap.title.c).setValue(ec.title);
+                    if (posMap.email) destSheet.getRange(ecRow, 2 + posMap.email.c).setValue(ec.email);
+                    if (posMap.linkedin) destSheet.getRange(ecRow, 2 + posMap.linkedin.c).setValue(ec.linkedin);
+                    if (posMap.geo) destSheet.getRange(ecRow, 2 + posMap.geo.c).setValue(ec.geo);
+                }
+            }
+        }
+
+        currentDestRow += 1 + currentBlockHeight + blankRows;
+        processedCount++;
+    }
+
+    // Clean up extra rows at the bottom
+    const finalMaxRows = destSheet.getMaxRows();
+    const finalUsedRow = destSheet.getLastRow();
+    if (finalMaxRows > finalUsedRow + 10) {
+        destSheet.deleteRows(finalUsedRow + 5, finalMaxRows - finalUsedRow - 5);
+    }
+
+    // Copy column widths from template
+    for (let c = 1; c <= fullHeaderWidth; c++) {
+        destSheet.setColumnWidth(c + 1, templateSheet.getColumnWidth(c));
+    }
+
+    ui.alert("✅ Expansion Complete\n\nProcessed " + processedCount + " vendors into sheet: \"" + destSheetName + "\"");
+}

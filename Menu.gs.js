@@ -2,11 +2,6 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
 
   ui.createMenu("⚡ CRM Tools")
-    .addItem("Create New Vendor", "createNewVendor")
-    .addItem("Update ALL Vendor Blocks", "startUpdateAllVendorBlocksBatched")
-    .addItem("Sync Mailing List", "manualSyncMailingList")
-    .addItem("Reconnect Notes Links", "reconnectNotesLinks")
-    .addItem("Rename Header", "renameHeader")
     .addItem("Create Filtered View", "createFilteredView")
     .addSeparator()
     .addItem("Rank Vendors", "rankVendors")
@@ -14,8 +9,7 @@ function onOpen() {
     .addItem("Remove Vendor", "removeVendor")
     .addItem("Sync Sheets", "syncSheets")
     .addSeparator()
-    .addItem("Rename Sheet", "renameSheet")
-    .addItem("Manual Backup", "manualBackup")
+    .addItem("Expand New Sheet Vendors", "expandNewSheetVendors")
     .addToUi();
 
   // Show batch update completion message if a batch finished while sheet was closed
